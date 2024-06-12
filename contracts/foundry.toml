@@ -1,0 +1,16 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+
+[fmt]
+tab_width = 4
+bracket_spacing = true
+line_length = 120
+multiline_func_header = 'all'
+wrap_comments = true
+int_types = "long"
+number_underscore = "thousands"
+quote_style = "double"
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
