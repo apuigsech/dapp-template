@@ -1,0 +1,172 @@
+name: Contracts Main
+
+on:
+  push:
+    paths:
+      - 'contracts/**'
+  pull_request:
+    paths:
+      - 'contracts/**'
+
+permissions:
+  contents: read
+
+jobs:
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: solhint
+        working-directory: contracts
+        run: |
+          npm install -g solhint
+          solhint -f table src/**/*.sol
+      
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - name: build
+        working-directory: contracts
+        run: forge build
+      - name: test
+        working-directory: contracts
+        run: forge test
+      - name: coverage-report
+        working-directory: contracts
+        run: forge coverage
+  
+  security-test:
+    name: Security Test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - uses: actions/setup-python@v5
+      - name: Install Mythril
+        run: pip3 install mythril
+      - name: mythril
+        working-directory: contracts
+        run: |
+          jq -R -s '{remappings: split("\n") | map(select(startswith("@")))}' remappings.txt > remappings.json
+          myth analyze $(find src -name "*.sol") --solc-json remappings.json
+
+  generate-docs:
+    name: Generate Documentation
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - name: generate-docs
+        working-directory: contracts
+        run: forge doc --build
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: docs
+          path: ./contracts/docs/book
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: docs
+  
+  deploy-sepolia:
+    name: Deploy to Sepolia
+    runs-on: ubuntu-latest
+    needs: 
+      - test
+      - security-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: sepolia
+    permissions:
+      contents: write
+    outputs:
+      contract_abi: ${{ steps.deploy.outputs.contract_version }}
+      contract_address: ${{ steps.deploy.outputs.contract_address }}
+      contract_version: ${{ steps.deploy.outputs.contract_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - name: deploy
+        id: deploy
+        working-directory: contracts
+        run: |
+          CONTRACT_ABI=$(forge inspect Counter abi)
+          CONTRACT_ADDRESS=$(forge create src/Counter.sol:Counter --constructor-args 0 --rpc-url ${{ secrets.RPC_URL }} --private-key ${{ secrets.ADMIN_PRIVATE_KEY }} --json | jq -r '.deployedTo')
+          CONTRACT_VERSION=${GITHUB_REF#refs/tags/v*}
+          [[ $GITHUB_REF == refs/tags/v* ]] || CONTRACT_VERSION=$(git rev-parse --short HEAD)
+          echo "::set-output name=contract_abi::$CONTRACT_ABI"
+          echo "::set-output name=contract_address::$CONTRACT_ADDRESS"
+          echo "::set-output name=contract_version::$CONTRACT_VERSION"
+
+  update-contracts-index:
+    name: Update Contracts Index
+    runs-on: ubuntu-latest
+    needs: deploy-sepolia
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup git
+        run: |
+          git config --global user.email "github-actions@dapp-template"
+          git config --global user.name "github-actions"
+      - name: setup contracts-index branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH_NAME: contracts-index
+        run: |
+          if ! gh api repos/${{ github.repository }}/branches/${BRANCH_NAME} --silent; then
+            git switch --orphan ${BRANCH_NAME}
+            echo '{"networks":{}}' > contracts-index.json
+            git add contracts-index.json
+            git commit -m "Create ${BRANCH_NAME}"
+            git push origin ${BRANCH_NAME}
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: contracts-index
+      - name: add contract
+        run: |
+          CONTRACT_ABI=${{ needs.deploy-sepolia.outputs.contract_abi }}
+          CONTRACT_ADDRESS=${{ needs.deploy-sepolia.outputs.contract_address }}
+          CONTRACT_VERSION=${{ needs.deploy-sepolia.outputs.contract_version }}
+          jq --arg version "${CONTRACT_VERSION}" --arg address "${CONTRACT_ADDRESS}" --argjson abi "${CONTRACT_ABI}" \
+             '.networks.sepolia[$version].address = $address | .abi[$version] = $abi' contracts-index.json > temp.json && mv temp.json contracts-index.json
+          git add contracts-index.json
+          git commit -m "Aggregate ${CONTRACT_VERSION}"
+          git push
