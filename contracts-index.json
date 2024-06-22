@@ -1,1 +1,7 @@
-{}
+{
+  "sepolia": {
+    "1.0.0": {
+      "address": "0xe30BAC4f6A5F11d2459fab15eDD354f0063BBb02"
+    }
+  }
+}
