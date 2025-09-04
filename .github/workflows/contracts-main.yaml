@@ -60,7 +60,7 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: nightly
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
       - name: Install Mythril
         run: pip3 install mythril
       - name: mythril
